@@ -1,4 +1,4 @@
-#!/opt/homebrew/bin/python3
+#!/usr/bin/env python3
 """gitfeed — one JSON feed of your GitHub repos plus local working-tree status.
 
 Usage:
@@ -18,7 +18,7 @@ CONFIG = Path.home() / ".config/gitfeed/config.json"
 CACHE = Path.home() / ".cache/gitfeed/remote.json"
 CACHE_TTL = 600
 DEFAULTS = {"show_clean": True, "roots": ["~/projects"], "max_repos": 40}
-PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"  # SwiftBar/Übersicht run with a bare PATH
+PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"  # Apple Silicon + Intel Homebrew; SwiftBar/Übersicht run with a bare PATH
 
 QUERY = """query($cursor: String) {
   viewer { repositories(first: 100, after: $cursor, ownerAffiliations: OWNER,
@@ -118,8 +118,8 @@ def local_status(path):
 
 
 def local_checkouts(roots):
-    dirs = [d for root in roots for d in Path(os.path.expanduser(root)).iterdir()
-            if (d / ".git").exists()]
+    roots = [Path(os.path.expanduser(r)) for r in roots]
+    dirs = [d for root in roots if root.is_dir() for d in root.iterdir() if (d / ".git").exists()]
     with ThreadPoolExecutor(8) as pool:
         return [s for s in pool.map(lambda d: _safe(local_status, d), dirs) if s]
 
@@ -129,6 +129,10 @@ def _safe(fn, *a):
         return fn(*a)
     except Exception:
         return None
+
+
+def parse_time(s):
+    return datetime.fromisoformat(s.replace("Z", "+00:00"))  # Python 3.9 (macOS's own) can't parse "Z"
 
 
 def age(delta):
@@ -170,12 +174,12 @@ def feed():
     for it in items:
         loc = it["local"]
         it["dirty"] = bool(loc and (loc["staged"] or loc["unstaged"] or loc["untracked"] or loc["ahead"]))
-        dates = [datetime.fromisoformat(d) for d in (it["last_commit"], loc and loc["last_local_commit"]) if d]
+        dates = [parse_time(d) for d in (it["last_commit"], loc and loc["last_local_commit"]) if d]
         last = max(dates) if dates else None
         it["last_activity"] = last.isoformat() if last else None
         it["age"] = age(now - last) if last else "—"
         it["status"] = status_text(loc)
-    items.sort(key=lambda i: datetime.fromisoformat(i["last_activity"]).timestamp() if i["last_activity"] else 0,
+    items.sort(key=lambda i: parse_time(i["last_activity"]).timestamp() if i["last_activity"] else 0,
                reverse=True)
     return {"generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "show_clean": cfg["show_clean"],
             "error": error, "dirty_count": sum(i["dirty"] for i in items),

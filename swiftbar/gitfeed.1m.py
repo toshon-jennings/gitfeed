@@ -1,4 +1,4 @@
-#!/opt/homebrew/bin/python3
+#!/usr/bin/env python3
 # <swiftbar.title>gitfeed</swiftbar.title>
 # <swiftbar.desc>Cycles through your GitHub repos with last-commit age and local git status.</swiftbar.desc>
 # <swiftbar.hideRunInTerminal>true</swiftbar.hideRunInTerminal>
@@ -6,11 +6,14 @@
 # <swiftbar.hideDisablePlugin>true</swiftbar.hideDisablePlugin>
 # <swiftbar.hideSwiftBar>true</swiftbar.hideSwiftBar>
 """SwiftBar plugin. Symlink into your SwiftBar plugin folder; it reads ../bin/gitfeed."""
-import json, os, subprocess, sys
+import base64, json, os, subprocess, sys
 
 GITFEED = os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "bin", "gitfeed")
 GITFEED = os.path.normpath(GITFEED)
-ICON = ":arrow.triangle.branch:"
+HERE = os.path.dirname(os.path.realpath(__file__))
+# gitfeed mark (docs/logo-template.svg), as a template image so macOS tints it for light/dark menu bars
+with open(os.path.join(HERE, "icon.png"), "rb") as f:
+    ICON = "templateImage=" + base64.b64encode(f.read()).decode()
 TITLE_LEN = 30  # hard cap on menu bar width, in characters
 MENU = "font=Menlo size=12"
 
@@ -18,7 +21,7 @@ try:
     data = json.loads(subprocess.run([sys.executable, GITFEED], capture_output=True, text=True,
                                      timeout=60, check=True).stdout)
 except Exception as e:
-    print(f"{ICON} ! | color=#c0392b")
+    print(f"! | color=#c0392b {ICON}")
     print("---")
     print(f"gitfeed failed: {e}")
     print("Refresh | refresh=true")
@@ -35,11 +38,11 @@ def text(v):
 
 def quoted(v):
     """Parameter value after '|', in SwiftBar's quoted form so spaces and '=' stay inside it.
-    None when the value can't be carried safely (a '|' or newline would end the item)."""
+    None when the value can't be carried safely (a '|', newline, quote or backslash)."""
     v = str(v)
-    if any(c in v for c in "|\n\r"):
+    if any(c in v for c in '|\n\r"\\'):  # don't rely on SwiftBar's escape handling
         return None
-    return '"' + v.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    return f'"{v}"'
 
 
 def link(r):
@@ -50,10 +53,10 @@ def link(r):
 # Header: SwiftBar rotates every line above the first '---'.
 if cycle:
     for r in cycle:
-        print(f"{ICON} {text(' '.join(x for x in (r['name'], r['age'], r['status']) if x))} "
-              f"| length={TITLE_LEN} {link(r)}")
+        print(f"{text(' '.join(x for x in (r['name'], r['age'], r['status']) if x))} "
+              f"| length={TITLE_LEN} {ICON} {link(r)}")
 else:
-    print(ICON)
+    print(f" | {ICON}")
 
 print("---")
 if data["error"]:
