@@ -9,7 +9,7 @@ Usage:
 Remote data comes from one `gh api graphql` call, cached for CACHE_TTL seconds.
 Local status is read fresh from `git` on every run (it's fast).
 """
-import json, os, subprocess, sys, time
+import json, os, re, subprocess, sys, time
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -28,7 +28,14 @@ QUERY = """query($cursor: String) {
       defaultBranchRef { target { ... on Commit { committedDate } } } } } } }"""
 
 
+# A checkout's own .git/config can name programs git runs during `status` (fsmonitor); never let it.
+GIT_SAFE = ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "core.untrackedCache=false"]
+SLUG = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+
+
 def run(args, cwd=None):
+    if args[0] == "git":
+        args = ["git", *GIT_SAFE, *args[1:]]
     env = {**os.environ, "PATH": PATH + ":" + os.environ.get("PATH", "")}
     r = subprocess.run(args, cwd=cwd, capture_output=True, text=True, env=env, timeout=30)
     if r.returncode:
@@ -77,7 +84,8 @@ def github_slug(remote):
     for prefix in ("git@github.com:", "https://github.com/", "ssh://git@github.com/"):
         if remote.startswith(prefix):
             slug = remote[len(prefix):]
-            return slug[:-4] if slug.endswith(".git") else slug
+            slug = slug[:-4] if slug.endswith(".git") else slug
+            return slug if SLUG.match(slug) else None
     return None
 
 

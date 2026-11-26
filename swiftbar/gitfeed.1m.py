@@ -28,31 +28,46 @@ repos = data["repos"]
 cycle = repos if data["show_clean"] else [r for r in repos if r["dirty"]]
 
 
+def text(v):
+    """Text shown before '|': a '|' or newline in it would start SwiftBar parameters or a new item."""
+    return " ".join(str(v).replace("|", "¦").split())
+
+
+def quoted(v):
+    """Parameter value after '|', in SwiftBar's quoted form so spaces and '=' stay inside it.
+    None when the value can't be carried safely (a '|' or newline would end the item)."""
+    v = str(v)
+    if any(c in v for c in "|\n\r"):
+        return None
+    return '"' + v.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
 def link(r):
-    return f"href={r['url']}" if r["url"] else ""
+    url = r["url"] and quoted(r["url"])
+    return f"href={url}" if url else ""
 
 
 # Header: SwiftBar rotates every line above the first '---'.
 if cycle:
     for r in cycle:
-        print(f"{ICON} {' '.join(x for x in (r['name'], r['age'], r['status']) if x)} "
+        print(f"{ICON} {text(' '.join(x for x in (r['name'], r['age'], r['status']) if x))} "
               f"| length={TITLE_LEN} {link(r)}")
 else:
     print(ICON)
 
 print("---")
 if data["error"]:
-    print(f"{data['error']} | color=#c0392b")
+    print(f"{text(data['error'])} | color=#c0392b")
 
-width = max((len(r["name"]) for r in repos), default=0)
+width = max((len(text(r["name"])) for r in repos), default=0)
 for r in repos:
-    line = f"{r['name'].ljust(width)}  {r['age'].rjust(3)}  {r['status']}".rstrip()
+    line = f"{text(r['name']).ljust(width)}  {r['age'].rjust(3)}  {r['status']}".rstrip()
     print(f"{line} | {MENU} {link(r)}")
-    if r["local"]:  # hold ⌥ to open the checkout in Finder instead
-        print(f"{line}  ⌥ open folder | {MENU} alternate=true bash=/usr/bin/open "
-              f"param1={r['local']['path']} terminal=false")
+    path = r["local"] and quoted(r["local"]["path"])
+    if path:  # hold ⌥ to open the checkout in Finder instead
+        print(f"{line}  ⌥ open folder | {MENU} alternate=true bash=/usr/bin/open param1={path} terminal=false")
 
 print("---")
 print(f"Show clean repos in cycle | checked={str(data['show_clean']).lower()} "
-      f"bash={sys.executable} param1={GITFEED} param2=toggle-clean terminal=false refresh=true")
+      f"bash={quoted(sys.executable)} param1={quoted(GITFEED)} param2=toggle-clean terminal=false refresh=true")
 print("Refresh now | refresh=true")
