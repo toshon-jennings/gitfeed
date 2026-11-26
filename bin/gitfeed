@@ -1,0 +1,194 @@
+#!/opt/homebrew/bin/python3
+"""gitfeed — one JSON feed of your GitHub repos plus local working-tree status.
+
+Usage:
+  gitfeed               print the feed as JSON (used by the menu bar and desktop ticker)
+  gitfeed toggle-clean  flip whether clean repos appear in the cycle
+  gitfeed config        print the config file path
+
+Remote data comes from one `gh api graphql` call, cached for CACHE_TTL seconds.
+Local status is read fresh from `git` on every run (it's fast).
+"""
+import json, os, subprocess, sys, time
+from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+CONFIG = Path.home() / ".config/gitfeed/config.json"
+CACHE = Path.home() / ".cache/gitfeed/remote.json"
+CACHE_TTL = 600
+DEFAULTS = {"show_clean": True, "roots": ["~/projects"], "max_repos": 40}
+PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"  # SwiftBar/Übersicht run with a bare PATH
+
+QUERY = """query($cursor: String) {
+  viewer { repositories(first: 100, after: $cursor, ownerAffiliations: OWNER,
+           orderBy: {field: PUSHED_AT, direction: DESC}) {
+    pageInfo { hasNextPage endCursor }
+    nodes { nameWithOwner name url isPrivate isArchived pushedAt
+      defaultBranchRef { target { ... on Commit { committedDate } } } } } } }"""
+
+
+def run(args, cwd=None):
+    env = {**os.environ, "PATH": PATH + ":" + os.environ.get("PATH", "")}
+    r = subprocess.run(args, cwd=cwd, capture_output=True, text=True, env=env, timeout=30)
+    if r.returncode:
+        raise RuntimeError(r.stderr.strip() or f"{args[0]} failed")
+    return r.stdout
+
+
+def load_config():
+    try:
+        return {**DEFAULTS, **json.loads(CONFIG.read_text())}
+    except (OSError, ValueError):
+        return dict(DEFAULTS)
+
+
+def save_config(cfg):
+    CONFIG.parent.mkdir(parents=True, exist_ok=True)
+    CONFIG.write_text(json.dumps(cfg, indent=2) + "\n")
+
+
+def remote_repos():
+    if CACHE.exists() and time.time() - CACHE.stat().st_mtime < CACHE_TTL:
+        return json.loads(CACHE.read_text())
+    repos, cursor = [], None
+    while True:
+        args = ["gh", "api", "graphql", "-f", f"query={QUERY}"]
+        if cursor:
+            args += ["-f", f"cursor={cursor}"]
+        page = json.loads(run(args))["data"]["viewer"]["repositories"]
+        for n in page["nodes"]:
+            if n["isArchived"]:
+                continue
+            target = (n.get("defaultBranchRef") or {}).get("target") or {}
+            repos.append({"full_name": n["nameWithOwner"], "name": n["name"], "url": n["url"],
+                          "private": n["isPrivate"],
+                          "last_commit": target.get("committedDate") or n["pushedAt"]})
+        if not page["pageInfo"]["hasNextPage"]:
+            break
+        cursor = page["pageInfo"]["endCursor"]
+    CACHE.parent.mkdir(parents=True, exist_ok=True)
+    CACHE.write_text(json.dumps(repos))
+    return repos
+
+
+def github_slug(remote):
+    """git@github.com:o/r.git or https://github.com/o/r(.git) -> o/r"""
+    for prefix in ("git@github.com:", "https://github.com/", "ssh://git@github.com/"):
+        if remote.startswith(prefix):
+            slug = remote[len(prefix):]
+            return slug[:-4] if slug.endswith(".git") else slug
+    return None
+
+
+def local_status(path):
+    s = {"path": str(path), "branch": None, "staged": 0, "unstaged": 0, "untracked": 0,
+         "ahead": 0, "behind": 0, "upstream": False}
+    for line in run(["git", "status", "--porcelain=v2", "--branch"], cwd=path).splitlines():
+        if line.startswith("# branch.head "):
+            s["branch"] = line.split(" ", 2)[2]
+        elif line.startswith("# branch.upstream "):
+            s["upstream"] = True
+        elif line.startswith("# branch.ab "):
+            a, b = line.split()[2:4]
+            s["ahead"], s["behind"] = int(a), -int(b)
+        elif line[:2] in ("1 ", "2 ", "u "):
+            xy = line.split(" ", 2)[1]
+            s["staged"] += xy[0] != "."
+            s["unstaged"] += xy[1] != "."
+        elif line.startswith("? "):
+            s["untracked"] += 1
+    try:
+        s["last_local_commit"] = run(["git", "log", "-1", "--format=%cI"], cwd=path).strip() or None
+    except RuntimeError:  # repo with no commits yet
+        s["last_local_commit"] = None
+    try:
+        s["slug"] = github_slug(run(["git", "remote", "get-url", "origin"], cwd=path).strip())
+    except RuntimeError:
+        s["slug"] = None
+    return s
+
+
+def local_checkouts(roots):
+    dirs = [d for root in roots for d in Path(os.path.expanduser(root)).iterdir()
+            if (d / ".git").exists()]
+    with ThreadPoolExecutor(8) as pool:
+        return [s for s in pool.map(lambda d: _safe(local_status, d), dirs) if s]
+
+
+def _safe(fn, *a):
+    try:
+        return fn(*a)
+    except Exception:
+        return None
+
+
+def age(delta):
+    s = int(delta.total_seconds())
+    for unit, size in (("y", 31536000), ("mo", 2592000), ("w", 604800), ("d", 86400), ("h", 3600), ("m", 60)):
+        if s >= size:
+            return f"{s // size}{unit}"
+    return "now"
+
+
+def status_text(loc):
+    """git-status-style summary: +staged ~modified ?untracked ↑ahead ↓behind. '' when clean or not local."""
+    if not loc:
+        return ""
+    parts = [(loc["staged"], "+"), (loc["unstaged"], "~"), (loc["untracked"], "?"),
+             (loc["ahead"], "↑"), (loc["behind"], "↓")]
+    return " ".join(f"{sym}{n}" for n, sym in parts if n)
+
+
+def feed():
+    cfg = load_config()
+    error = None
+    try:
+        remote = remote_repos()
+    except Exception as e:  # offline or gh signed out: still show local repos
+        remote, error = [], f"GitHub unavailable: {e}"
+    by_slug = {r["full_name"].lower(): {**r, "local": None} for r in remote}
+    items = list(by_slug.values())
+    for loc in local_checkouts(cfg["roots"]):
+        match = by_slug.get((loc["slug"] or "").lower())
+        if match:
+            match["local"] = loc
+        else:
+            name = Path(loc["path"]).name
+            items.append({"full_name": loc["slug"] or name, "name": name,
+                          "url": f"https://github.com/{loc['slug']}" if loc["slug"] else None,
+                          "private": None, "last_commit": None, "local": loc})
+    now = datetime.now(timezone.utc)
+    for it in items:
+        loc = it["local"]
+        it["dirty"] = bool(loc and (loc["staged"] or loc["unstaged"] or loc["untracked"] or loc["ahead"]))
+        dates = [datetime.fromisoformat(d) for d in (it["last_commit"], loc and loc["last_local_commit"]) if d]
+        last = max(dates) if dates else None
+        it["last_activity"] = last.isoformat() if last else None
+        it["age"] = age(now - last) if last else "—"
+        it["status"] = status_text(loc)
+    items.sort(key=lambda i: datetime.fromisoformat(i["last_activity"]).timestamp() if i["last_activity"] else 0,
+               reverse=True)
+    return {"generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "show_clean": cfg["show_clean"],
+            "error": error, "dirty_count": sum(i["dirty"] for i in items),
+            # cap trims clean repos only; anything with pending work always stays in the feed
+            "repos": [it for n, it in enumerate(items) if it["dirty"] or n < cfg["max_repos"]]}
+
+
+def main():
+    cmd = sys.argv[1] if len(sys.argv) > 1 else ""
+    if cmd == "toggle-clean":
+        cfg = load_config()
+        cfg["show_clean"] = not cfg["show_clean"]
+        save_config(cfg)
+        print("clean repos " + ("shown" if cfg["show_clean"] else "hidden"))
+    elif cmd == "config":
+        print(CONFIG)
+    elif cmd == "":
+        print(json.dumps(feed()))
+    else:
+        sys.exit(__doc__)
+
+
+if __name__ == "__main__":
+    main()
