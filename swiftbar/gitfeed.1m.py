@@ -54,7 +54,7 @@ def link(r):
 if cycle:
     for r in cycle:
         print(f"{text(' '.join(x for x in (r['name'], r['age'], r['status']) if x))} "
-              f"| length={TITLE_LEN} {ICON} {link(r)}")
+              f"| length={TITLE_LEN} {ICON}")
 else:
     print(f" | {ICON}")
 

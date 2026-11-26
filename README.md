@@ -113,9 +113,21 @@ gitfeed/bin/gitfeed toggle-clean
 
 ## Troubleshooting
 
-**The menu bar item doesn't appear.** On a crowded menu bar, macOS pushes new items off-screen
-without telling you. Remove an icon or two with ⌘-drag, or use a menu bar manager such as
-[Ice](https://github.com/jordanbaird/Ice).
+**The menu bar item doesn't appear, or clicking it shows nothing.** macOS only places menu bar
+icons to the right of the notch, and a new icon goes last, so on a full menu bar gitfeed can end
+up off-screen, where macOS won't open its menu. Move it into view by giving it a position near
+the right (lower numbers sit further right) and restarting SwiftBar:
+
+```bash
+defaults write com.ameba.SwiftBar "NSStatusItem Preferred Position $(cd gitfeed && pwd -P)/swiftbar/gitfeed.1m.py" -float 450
+```
+
+```bash
+osascript -e 'quit app "SwiftBar"' && open -a SwiftBar
+```
+
+If it lands behind the notch, try a smaller number. Something else may get pushed off the
+other end instead.
 
 **The desktop strip doesn't appear.** Quit and reopen Übersicht. If your Dock isn't at the
 bottom, or is larger than usual, change `bottom:` near the top of
